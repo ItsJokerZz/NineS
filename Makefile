@@ -1,47 +1,99 @@
-#   Copyright (C) 2023 John Törnblom
-#
-# This file is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; see the file COPYING. If not see
-# <http://www.gnu.org/licenses/>.
+NAME    := nineS
+LIB     := lib$(NAME).a
 
-PS5_HOST ?= PS5
-PS5_PORT ?= 9021
+override PLATFORM := $(strip $(subst PS5,ps5,$(subst PS4,ps4,$(PLATFORM))))
 
-ifdef PS5_PAYLOAD_SDK
-    include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
-else
+ifeq ($(PLATFORM),)
+
+SDKS := $(strip $(if $(PS4_PAYLOAD_SDK),ps4) $(if $(PS5_PAYLOAD_SDK),ps5))
+
+.PHONY: all ps4 ps5 clean
+
+all:
+	@test -n "$(SDKS)" || { \
+		echo "Neither PS4_PAYLOAD_SDK nor PS5_PAYLOAD_SDK is defined" >&2; \
+		exit 1; }
+	@for platform in $(SDKS); do \
+		$(MAKE) --no-print-directory PLATFORM=$$platform all || exit 1; \
+	done
+
+ps4 ps5:
+	@$(MAKE) --no-print-directory PLATFORM=$@ all
+
+clean:
+	rm -rf build
+
+else ifeq ($(PLATFORM),ps4)
+
+ifndef PS4_PAYLOAD_SDK
+    $(error PS4_PAYLOAD_SDK is undefined)
+endif
+
+include $(PS4_PAYLOAD_SDK)/toolchain/orbis.mk
+
+ELFLDR_DIR ?= ../ps4-elfldr
+
+ifeq ($(wildcard $(ELFLDR_DIR)/elfldr.h),)
+    $(error $(ELFLDR_DIR)/elfldr.h not found; set ELFLDR_DIR to a ps4-elfldr checkout)
+endif
+
+ARCH     := -mstackrealign
+EXTRAINC := -I$(ELFLDR_DIR)
+
+else ifeq ($(PLATFORM),ps5)
+
+ifndef PS5_PAYLOAD_SDK
     $(error PS5_PAYLOAD_SDK is undefined)
 endif
 
-ELF := code_injection_tests.elf
+include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
 
-CFLAGS := -Wall -Werror -g
+ELFLDR_DIR ?= ../ps5-elfldr
 
-all: $(ELF)
+ifeq ($(wildcard $(ELFLDR_DIR)/elfldr.h),)
+    $(error $(ELFLDR_DIR)/elfldr.h not found; set ELFLDR_DIR to a ps5-elfldr checkout)
+endif
 
-$(ELF): src/*.c
-		$(CC) $(CFLAGS) -o $@ $^
+ARCH     :=
+EXTRAINC := -I$(ELFLDR_DIR)
+
+else
+
+$(error Unknown PLATFORM '$(PLATFORM)', expected ps4 or ps5)
+
+endif
+
+ifneq ($(PLATFORM),)
+
+PTRACE_DIR ?= ../lib-ps-ptrace
+
+ifeq ($(wildcard $(PTRACE_DIR)/include/ptrace.h),)
+    $(error $(PTRACE_DIR)/include/ptrace.h not found; set PTRACE_DIR to a lib-ps-ptrace checkout)
+endif
+
+SOURCES := $(wildcard src/*.cpp)
+BUILD   ?= build/$(PLATFORM)
+OPT     ?= -O2
+OBJECTS := $(SOURCES:src/%.cpp=$(BUILD)/%.o)
+CXXFLAGS := -std=c++2b $(OPT) $(ARCH) -fPIC -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections
+CXXFLAGS += -Wall -Werror -Iinclude -Isrc -I$(PTRACE_DIR)/include $(EXTRAINC) -MMD -MP $(if $(DEBUG),-g)
+
+.PHONY: all clean
+
+all: $(BUILD)/$(LIB)
+
+$(BUILD)/$(LIB): $(OBJECTS)
+	@mkdir -p $(dir $@)
+	rm -f $@
+	$(AR) rcs $@ $^
+
+$(BUILD)/%.o: src/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-		rm -f $(ELF)
+	rm -rf $(BUILD)
 
-test: $(ELF)
-		$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $^
+-include $(OBJECTS:.o=.d)
 
-debug: $(ELF)
-        gdb \
-        -ex "target extended-remote $(PS5_HOST):2159" \
-        -ex "file $(ELF)" \
-        -ex "remote put $(ELF) /data/$(ELF)" \
-        -ex "set remote exec-file /data/$(ELF)" \
-        -ex "start"
+endif
